@@ -6,7 +6,9 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"os/exec"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -21,12 +23,14 @@ var (
 	silent  bool
 	verbose bool
 	test    bool
+	power   bool
 )
 
 func init() {
-	flag.BoolVar(&silent, "y", false, "Skips prompts")
+	flag.BoolVar(&silent, "y", false, "Skip prompts")
 	flag.BoolVar(&verbose, "v", false, "Verbose")
-	flag.BoolVar(&test, "t", false, "Skips irreversible actions")
+	flag.BoolVar(&test, "t", false, "Do not close anything")
+	flag.BoolVar(&power, "p", false, "Close all Sections, Threads, and BaseNamedObjects Events")
 	flag.Parse()
 }
 
@@ -104,16 +108,14 @@ func main() {
 			fail = true
 			return
 		}
-		// for _, handleInfo := range handleInfos {
-		// 	log.Println(handleInfo.OTI.TypeName.String(), handleInfo.ONI.Name.String()) //
-		// }
 		for _, handleInfo := range handleInfos {
 			if handleName, handleType := handleInfo.ONI.Name.String(), handleInfo.OTI.TypeName.String(); false ||
 				strings.Contains(handleName, "windows_shell_global_counters") ||
 				strings.Contains(handleName, "DiabloII Check For Other Instances") ||
-				(strings.Contains(handleName, "BaseNamedObjects") && handleType == "Event") ||
-				handleType == "Section" ||
-				handleType == "Thread" {
+				(power &&
+					((strings.Contains(handleName, "BaseNamedObjects") && handleType == "Event") ||
+						handleType == "Section" ||
+						handleType == "Thread")) {
 				// Necessary: Timer, File, Directory, Key, Event, IoCompletion, ALPC Port, Mutant, Semaphore, TpWorkerFactory, DxgkCompositionObject, DxgkSharedSyncObject
 				// Other: WaitCompletionPacket, IRTimer, IoCompletionReserve, Token, Desktop, DxgkSharedResource, WindowStation
 				var dupHandle uintptr
@@ -155,6 +157,67 @@ func main() {
 			}
 		}
 	}
+
+	// detect Battle.net client
+	bnets := findProcessesByName(procs, "Battle.net.exe")
+	if bnets == nil || len(bnets) <= 0 {
+		log.Println("Cannot find Battle.net.exe")
+		return
+	}
+
+	// iter Battle.net clients
+	for _, bnet := range bnets {
+		log.Printf("Detected client: [%v] of [%v] \"%v\"\r\n", bnet.ProcessID, bnet.ParentProcessID, bnet.NameExe)
+
+		if test {
+			continue
+		}
+		if err := exec.Command("taskkill", "/pid", strconv.Itoa(bnet.ProcessID)).Run(); err != nil {
+			if verbose {
+				log.Printf("Stubborn process: [%v] \"%v\" %v\r\n", bnet.ProcessID, bnet.NameExe, err)
+			}
+			// fallback: IsProcessCritical() TerminateProcess() of win32api
+			hProcess, err := windows.OpenProcess(windows.PROCESS_TERMINATE|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(bnet.ProcessID))
+			if err != nil {
+				if verbose {
+					log.Printf("Cannot open process: [%v] \"%v\" %v\r\n", bnet.ProcessID, bnet.NameExe, err)
+				}
+				fail = true
+				continue
+			}
+			isCritical, err := isProcessCritical(hProcess)
+			if err != nil {
+				if verbose {
+					log.Printf("Cannot determine whether the specified process is critical: [%v] \"%v\" %v\r\n", bnet.ProcessID, bnet.NameExe, err)
+				}
+				fail = true
+				continue
+			}
+			if isCritical {
+				if verbose {
+					log.Printf("Skipping critical process: [%v] \"%v\"\r\n", bnet.ProcessID, bnet.NameExe)
+				}
+				fail = true
+				continue
+			}
+			if err := windows.TerminateProcess(hProcess, uint32(syscall.SIGKILL)); err != nil {
+				if verbose {
+					log.Printf("Cannot terminate process: [%v] \"%v\" %v\r\n", bnet.ProcessID, bnet.NameExe, err)
+				}
+				fail = true
+				continue
+			}
+			windows.CloseHandle(hProcess)
+			if verbose {
+				log.Printf("Forcefully terminated process: [%v] \"%v\"\r\n", bnet.ProcessID, bnet.NameExe)
+			}
+			continue
+		}
+		if verbose {
+			log.Printf("Gracefully closed task: [%v] \"%v\"\r\n", bnet.ProcessID, bnet.NameExe)
+		}
+	}
+
 }
 
 // WindowsProcess is a Windows process.
@@ -379,4 +442,15 @@ func HandleInfos(pid uint32) ([]HandleInfo, error) {
 	}
 
 	return retHandleInfos, nil
+}
+
+var procIsProcessCritical = syscall.NewLazyDLL("kernel32.dll").NewProc("IsProcessCritical")
+
+func isProcessCritical(hProcess windows.Handle) (ret bool, err error) {
+	var holder uintptr
+	r1, _, e1 := procIsProcessCritical.Call(uintptr(hProcess), uintptr(unsafe.Pointer(&holder)))
+	if r1 == 0 { // r1 is false (func errored)
+		return false, e1
+	}
+	return holder != 0, nil
 }
