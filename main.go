@@ -65,7 +65,7 @@ func main() {
 	log.Println("d2rmcs", version, info)
 
 	// list processes
-	procs, errListProcesses := processes()
+	procs, errListProcesses := NewWindowsProcesses()
 	if errListProcesses != nil {
 		log.Println("Cannot list processes:", errListProcesses)
 		fail = true
@@ -78,7 +78,7 @@ func main() {
 	}
 
 	// detect D2R client
-	d2rs := findProcessesByName(procs, "D2R.exe")
+	d2rs := procs.FindProcessesByName("D2R.exe")
 	if d2rs == nil || len(d2rs) <= 0 {
 		log.Println("Cannot find D2R.exe")
 		fail = true
@@ -159,7 +159,7 @@ func main() {
 	}
 
 	// detect Battle.net client
-	bnets := findProcessesByName(procs, "Battle.net.exe")
+	bnets := procs.FindProcessesByName("Battle.net.exe")
 	if bnets == nil || len(bnets) <= 0 {
 		log.Println("Cannot find Battle.net.exe")
 		return
@@ -220,6 +220,8 @@ func main() {
 
 }
 
+type WindowsProcesses []WindowsProcess
+
 // WindowsProcess is a Windows process.
 type WindowsProcess struct {
 	ProcessID       int
@@ -244,7 +246,31 @@ func newWindowsProcess(e *windows.ProcessEntry32) WindowsProcess {
 	}
 }
 
-func processes() ([]WindowsProcess, error) {
+// modified a snippet from gopsutil
+func PIDs() ([]int32, error) {
+	// inspired by https://gist.github.com/henkman/3083408
+	// and https://github.com/giampaolo/psutil/blob/1c3a15f637521ba5c0031283da39c733fda53e4c/psutil/arch/windows/process_info.c#L315-L329
+	var ret []int32
+	var read uint32 = 0
+	var psSize uint32 = 1024
+	const dwordSize uint32 = 4
+	for {
+		ps := make([]uint32, psSize)
+		if err := windows.EnumProcesses(ps, &read); err != nil {
+			return nil, err
+		}
+		if uint32(len(ps)) == read { // ps buffer was too small to host every results, retry with a bigger one
+			psSize += 1024
+			continue
+		}
+		for _, pid := range ps[:read/dwordSize] {
+			ret = append(ret, int32(pid))
+		}
+		return ret, nil
+	}
+}
+
+func NewWindowsProcesses() (WindowsProcesses, error) {
 	hSnapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
 	if err != nil {
 		return nil, err
@@ -272,7 +298,7 @@ func processes() ([]WindowsProcess, error) {
 	}
 }
 
-func findProcessesByName(processes []WindowsProcess, name string) []WindowsProcess {
+func (processes WindowsProcesses) FindProcessesByName(name string) []WindowsProcess {
 	ret := []WindowsProcess{}
 	for _, p := range processes {
 		if strings.ToLower(p.NameExe) == strings.ToLower(name) {
@@ -282,10 +308,7 @@ func findProcessesByName(processes []WindowsProcess, name string) []WindowsProce
 	return ret
 }
 
-// if p := findProcessByPID(procs, 240); p != nil {
-// 	log.Println(p.NameExe)
-// }
-func findProcessByPID(processes []WindowsProcess, pid int) *WindowsProcess {
+func (processes WindowsProcesses) FindProcessByPID(pid int) *WindowsProcess {
 	for _, p := range processes {
 		if p.ProcessID == pid {
 			return &p
