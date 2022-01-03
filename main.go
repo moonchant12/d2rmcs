@@ -298,7 +298,7 @@ func NewWindowsProcesses() (WindowsProcesses, error) {
 	}
 }
 
-func (processes WindowsProcesses) FindProcessesByName(name string) []WindowsProcess {
+func (processes WindowsProcesses) FindProcessesByName(name string) WindowsProcesses {
 	ret := []WindowsProcess{}
 	for _, p := range processes {
 		if strings.ToLower(p.NameExe) == strings.ToLower(name) {
